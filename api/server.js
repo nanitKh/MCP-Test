@@ -14,7 +14,7 @@ const server = new McpServer(
   },
   {
     capabilities: {
-      tools: {}  // Let the server auto-discover tools
+      tools: {}
     }
   }
 );
@@ -51,7 +51,7 @@ async function fetchAllEstimates(filters = {}) {
         'Authorization': `Bearer ${process.env.FUNCTIONPOINT_API_KEY}`,
         'Content-Type': 'application/ld+json'
       },
-      timeout: 100000 // 100 second timeout (was 10 seconds in your code)
+      timeout: 10000 // 10 second timeout
     });
 
     return {
@@ -75,36 +75,27 @@ async function fetchAllEstimates(filters = {}) {
   }
 }
 
-// Register tools AFTER server creation but BEFORE handler
-server.setRequestHandler("tools/list", async () => {
-  return {
-    tools: [
-      {
-        name: "GetAllEstimates",
-        description: "Retrieve all estimates from FunctionPoint API. This tool fetches estimate data and can accept optional filters to narrow down results. Use this tool when users ask about estimates, project estimates, or need to see estimate information.",
-        inputSchema: {
+// Register the GetAllEstimates tool AFTER server creation
+server.registerTool(
+  "GetAllEstimates",
+  {
+    title: "Get All Estimates",
+    description: "Retrieve all estimates from FunctionPoint API. This tool fetches estimate data and can accept optional filters to narrow down results. Use this tool when users ask about estimates, project estimates, or need to see estimate information.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filters: {
           type: "object",
-          properties: {
-            filters: {
-              type: "object",
-              description: "Optional filters to apply to the estimates query. Can include parameters like status, client_id, project_id, date_range, etc.",
-              additionalProperties: true
-            }
-          },
-          additionalProperties: false
+          description: "Optional filters to apply to the estimates query. Can include parameters like status, client_id, project_id, date_range, etc.",
+          additionalProperties: true
         }
-      }
-    ]
-  };
-});
-
-server.setRequestHandler("tools/call", async (request) => {
-  const { name, arguments: args } = request.params;
-  
-  if (name === "GetAllEstimates") {
+      },
+      additionalProperties: false
+    }
+  },
+  async ({ filters }) => {
     try {
-      const filters = args?.filters || {};
-      const result = await fetchAllEstimates(filters);
+      const result = await fetchAllEstimates(filters || {});
 
       if (result.success) {
         return {
@@ -123,7 +114,7 @@ server.setRequestHandler("tools/call", async (request) => {
               text: JSON.stringify({
                 error: "Failed to fetch estimates",
                 details: result.error,
-                url_attempted: buildEstimatesUrl(filters)
+                url_attempted: buildEstimatesUrl(filters || {})
               }, null, 2)
             }
           ],
@@ -146,10 +137,8 @@ server.setRequestHandler("tools/call", async (request) => {
         isError: true
       };
     }
-  } else {
-    throw new Error(`Unknown tool: ${name}`);
   }
-});
+);
 
 // Vercel serverless function handler
 export default async function handler(req, res) {
@@ -157,7 +146,8 @@ export default async function handler(req, res) {
     // Set CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, mcp-session-id');
+    res.setHeader('Access-Control-Expose-Headers', 'mcp-session-id');
 
     // Handle preflight requests
     if (req.method === 'OPTIONS') {
@@ -227,8 +217,13 @@ export default async function handler(req, res) {
         return;
       }
      
-      // For MCP protocol, use streaming transport
-      const transport = new StreamableHTTPServerTransport({ req, res });
+      // Create transport and connect server
+      const transport = new StreamableHTTPServerTransport({ 
+        req, 
+        res,
+        sessionIdGenerator: () => `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+      });
+      
       await server.connect(transport);
       return; // Important: return here to avoid further processing
     } 
