@@ -14,22 +14,7 @@ const server = new McpServer(
   },
   {
     capabilities: {
-      tools: {
-        GetAllEstimates: {
-          description: "Retrieve all estimates from FunctionPoint API",
-          inputSchema: {
-            type: "object",
-            properties: {
-              filters: {
-                type: "object",
-                description: "Optional filters to apply to the estimates query",
-                additionalProperties: true
-              }
-            },
-            additionalProperties: false
-          }
-        }
-      }
+      tools: {}  // Let the server auto-discover tools
     }
   }
 );
@@ -66,7 +51,7 @@ async function fetchAllEstimates(filters = {}) {
         'Authorization': `Bearer ${process.env.FUNCTIONPOINT_API_KEY}`,
         'Content-Type': 'application/ld+json'
       },
-      timeout: 10000 // 10 second timeout
+      timeout: 100000 // 100 second timeout (was 10 seconds in your code)
     });
 
     return {
@@ -83,32 +68,42 @@ async function fetchAllEstimates(filters = {}) {
       error: {
         message: error.message,
         status: error.response?.status,
-        statusText: error.response?.statusText
+        statusText: error.response?.statusText,
+        data: error.response?.data
       }
     };
   }
 }
 
-// Register the GetAllEstimates tool
-server.registerTool(
-  {
-    name: "GetAllEstimates",
-    description: "Retrieve all estimates from FunctionPoint API. This tool fetches estimate data and can accept optional filters to narrow down results. Use this tool when users ask about estimates, project estimates, or need to see estimate information.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        filters: {
+// Register tools AFTER server creation but BEFORE handler
+server.setRequestHandler("tools/list", async () => {
+  return {
+    tools: [
+      {
+        name: "GetAllEstimates",
+        description: "Retrieve all estimates from FunctionPoint API. This tool fetches estimate data and can accept optional filters to narrow down results. Use this tool when users ask about estimates, project estimates, or need to see estimate information.",
+        inputSchema: {
           type: "object",
-          description: "Optional filters to apply to the estimates query. Can include parameters like status, client_id, project_id, date_range, etc.",
-          additionalProperties: true
+          properties: {
+            filters: {
+              type: "object",
+              description: "Optional filters to apply to the estimates query. Can include parameters like status, client_id, project_id, date_range, etc.",
+              additionalProperties: true
+            }
+          },
+          additionalProperties: false
         }
-      },
-      additionalProperties: false
-    }
-  },
-  async (args) => {
+      }
+    ]
+  };
+});
+
+server.setRequestHandler("tools/call", async (request) => {
+  const { name, arguments: args } = request.params;
+  
+  if (name === "GetAllEstimates") {
     try {
-      const filters = args.filters || {};
+      const filters = args?.filters || {};
       const result = await fetchAllEstimates(filters);
 
       if (result.success) {
@@ -124,10 +119,11 @@ server.registerTool(
         return {
           content: [
             {
-              type: "text", 
+              type: "text",
               text: JSON.stringify({
                 error: "Failed to fetch estimates",
-                details: result.error
+                details: result.error,
+                url_attempted: buildEstimatesUrl(filters)
               }, null, 2)
             }
           ],
@@ -150,13 +146,14 @@ server.registerTool(
         isError: true
       };
     }
+  } else {
+    throw new Error(`Unknown tool: ${name}`);
   }
-);
+});
 
 // Vercel serverless function handler
 export default async function handler(req, res) {
   try {
-    // Set CORS headers for Copilot Studio
     // Set CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -177,11 +174,29 @@ export default async function handler(req, res) {
       return;
     }
 
-    // Create transport and connect server
-    const transport = new StreamableHTTPServerTransport({ req, res });
-    await server.connect(transport);
     // Handle GET requests for testing/health check
     if (req.method === 'GET') {
+      // Handle test endpoint specifically
+      if (req.url === '/test') {
+        try {
+          const testResult = await fetchAllEstimates({});
+          res.status(200).json({
+            status: 'success',
+            message: 'API connection test successful',
+            data: testResult
+          });
+          return;
+        } catch (error) {
+          res.status(500).json({
+            status: 'error',
+            message: 'API connection test failed',
+            error: error.message
+          });
+          return;
+        }
+      }
+
+      // Default health check
       const healthCheck = {
         status: 'healthy',
         server: 'FunctionPoint-Estimates-API-Server',
@@ -191,32 +206,14 @@ export default async function handler(req, res) {
           mcp: 'POST / (MCP protocol)',
           health: 'GET / (this endpoint)',
           test: 'GET /test (test API connection)'
-        }
+        },
+        tools: ['GetAllEstimates']
       };
-      
+     
       res.status(200).json(healthCheck);
       return;
     }
-    
-    // Handle test endpoint
-    if (req.method === 'GET' && req.url === '/test') {
-      try {
-        const testResult = await fetchAllEstimates({});
-        res.status(200).json({
-          status: 'success',
-          message: 'API connection test successful',
-          data: testResult
-        });
-      } catch (error) {
-        res.status(500).json({
-          status: 'error',
-          message: 'API connection test failed',
-          error: error.message
-        });
-      }
-      return;
-    }
-    
+   
     // Handle MCP protocol requests (POST with JSON-RPC)
     if (req.method === 'POST') {
       // Check if it's a proper MCP request
@@ -229,16 +226,18 @@ export default async function handler(req, res) {
         });
         return;
       }
-      
+     
       // For MCP protocol, use streaming transport
       const transport = new StreamableHTTPServerTransport({ req, res });
       await server.connect(transport);
-    } else {
-      res.status(405).json({
-        error: 'Method not allowed',
-        allowed: ['GET', 'POST', 'OPTIONS']
-      });
-    }
+      return; // Important: return here to avoid further processing
+    } 
+
+    // Method not allowed
+    res.status(405).json({
+      error: 'Method not allowed',
+      allowed: ['GET', 'POST', 'OPTIONS']
+    });
 
   } catch (error) {
     console.error('Handler error:', error);
@@ -246,7 +245,6 @@ export default async function handler(req, res) {
     // Only send response if headers haven't been sent
     if (!res.headersSent) {
       res.status(500).json({
-        error: 'Server initialization failed',
         error: 'Server error',
         message: error.message
       });
