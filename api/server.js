@@ -1,47 +1,83 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import axios from "axios";
+import dotenv from "dotenv";
 
-// Simple function to fetch estimates
+dotenv.config();
+
+// Create the MCP server with proper configuration
+const server = new McpServer(
+  {
+    name: "FunctionPoint-Estimates-API-Server",
+    version: "1.0.0",
+    description: "MCP server for retrieving estimates from FunctionPoint API with filtering capabilities"
+  },
+  {
+    capabilities: {
+      tools: {
+        GetAllEstimates: {
+          description: "Retrieve all estimates from FunctionPoint API",
+          inputSchema: {
+            type: "object",
+            properties: {
+              filters: {
+                type: "object",
+                description: "Optional filters to apply to the estimates query",
+                additionalProperties: true
+              }
+            },
+            additionalProperties: false
+          }
+        }
+      }
+    }
+  }
+);
+
+// Function to build URL with filters
+function buildEstimatesUrl(filters) {
+  const baseUrl = `${process.env.FUNCTIONPOINT_BASE_URL}/estimates`;
+  const params = new URLSearchParams();
+
+  // Default pagination
+  params.append('page', '1');
+  params.append('itemsPerPage', '20');
+
+  // Add filters if provided
+  if (filters && typeof filters === 'object') {
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') {
+        params.append(key, value.toString());
+      }
+    });
+  }
+
+  return `${baseUrl}?${params.toString()}`;
+}
+
+// Function to fetch estimates with error handling
 async function fetchAllEstimates(filters = {}) {
   try {
-    const baseUrl = process.env.FUNCTIONPOINT_BASE_URL;
-    const apiKey = process.env.FUNCTIONPOINT_API_KEY;
-    
-    if (!baseUrl || !apiKey) {
-      throw new Error('Missing environment variables: FUNCTIONPOINT_BASE_URL or FUNCTIONPOINT_API_KEY');
-    }
-    
-    const params = new URLSearchParams();
-    params.append('page', '1');
-    params.append('itemsPerPage', '20');
-    
-    // Add filters if provided
-    if (filters && typeof filters === 'object') {
-      Object.entries(filters).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== '') {
-          params.append(key, value.toString());
-        }
-      });
-    }
-    
-    const url = `${baseUrl}/estimates?${params.toString()}`;
-    
+    const url = buildEstimatesUrl(filters);
+
     const response = await axios.get(url, {
       headers: {
         'Accept': 'application/ld+json',
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
+        'Authorization': `Bearer ${process.env.FUNCTIONPOINT_API_KEY}`,
+        'Content-Type': 'application/ld+json'
       },
-      timeout: 8000 // 8 second timeout
+      timeout: 10000 // 10 second timeout
     });
-    
+
     return {
       success: true,
       data: response.data,
-      url: url
+      url: url // Include URL for debugging
     };
-    
+
   } catch (error) {
     console.error('Error fetching estimates:', error.message);
+
     return {
       success: false,
       error: {
@@ -53,212 +89,166 @@ async function fetchAllEstimates(filters = {}) {
   }
 }
 
-// Handle MCP protocol requests
-async function handleMCPRequest(body) {
-  try {
-    const { method, params = {}, id } = body;
-    
-    console.log(`MCP Request: ${method}`, params);
-    
-    switch (method) {
-      case 'initialize':
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            protocolVersion: "2024-11-05",
-            capabilities: {
-              tools: {
-                listChanged: false
-              }
-            },
-            serverInfo: {
-              name: "FunctionPoint-Estimates-API-Server",
-              version: "1.0.0"
-            }
-          }
-        };
-      
-      case 'tools/list':
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            tools: [
-              {
-                name: "GetAllEstimates",
-                description: "Retrieve all estimates from FunctionPoint API with optional filters",
-                inputSchema: {
-                  type: "object",
-                  properties: {
-                    filters: {
-                      type: "object",
-                      description: "Optional filters to apply to the estimates query",
-                      additionalProperties: true
-                    }
-                  },
-                  additionalProperties: false
-                }
-              }
-            ]
-          }
-        };
-      
-      case 'tools/call':
-        if (params.name === 'GetAllEstimates') {
-          const filters = params.arguments?.filters || {};
-          const result = await fetchAllEstimates(filters);
-          
-          if (result.success) {
-            return {
-              jsonrpc: "2.0",
-              id,
-              result: {
-                content: [
-                  {
-                    type: "text",
-                    text: JSON.stringify(result.data, null, 2)
-                  }
-                ]
-              }
-            };
-          } else {
-            return {
-              jsonrpc: "2.0",
-              id,
-              error: {
-                code: -1,
-                message: "Failed to fetch estimates",
-                data: result.error
-              }
-            };
-          }
-        } else {
-          return {
-            jsonrpc: "2.0",
-            id,
-            error: {
-              code: -32601,
-              message: `Tool '${params.name}' not found`
-            }
-          };
+// Register the GetAllEstimates tool
+server.registerTool(
+  {
+    name: "GetAllEstimates",
+    description: "Retrieve all estimates from FunctionPoint API. This tool fetches estimate data and can accept optional filters to narrow down results. Use this tool when users ask about estimates, project estimates, or need to see estimate information.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filters: {
+          type: "object",
+          description: "Optional filters to apply to the estimates query. Can include parameters like status, client_id, project_id, date_range, etc.",
+          additionalProperties: true
         }
-      
-      default:
-        return {
-          jsonrpc: "2.0",
-          id,
-          error: {
-            code: -32601,
-            message: `Method '${method}' not found`
-          }
-        };
+      },
+      additionalProperties: false
     }
-  } catch (error) {
-    console.error('MCP Request handling error:', error);
-    return {
-      jsonrpc: "2.0",
-      id: body.id || null,
-      error: {
-        code: -32603,
-        message: "Internal error",
-        data: error.message
-      }
-    };
-  }
-}
+  },
+  async (args) => {
+    try {
+      const filters = args.filters || {};
+      const result = await fetchAllEstimates(filters);
 
-// Main Vercel serverless function handler
+      if (result.success) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result.data, null, 2)
+            }
+          ]
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: "text", 
+              text: JSON.stringify({
+                error: "Failed to fetch estimates",
+                details: result.error
+              }, null, 2)
+            }
+          ],
+          isError: true
+        };
+      }
+
+    } catch (error) {
+      console.error('Tool execution error:', error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              error: "Internal server error",
+              message: error.message
+            }, null, 2)
+          }
+        ],
+        isError: true
+      };
+    }
+  }
+);
+
+// Vercel serverless function handler
 export default async function handler(req, res) {
   try {
-    console.log(`${req.method} ${req.url}`);
-    
+    // Set CORS headers for Copilot Studio
     // Set CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    
+
     // Handle preflight requests
     if (req.method === 'OPTIONS') {
-      return res.status(200).end();
+      res.status(200).end();
+      return;
     }
-    
-    // Environment variable check
+
+    // Validate environment variables
     if (!process.env.FUNCTIONPOINT_BASE_URL || !process.env.FUNCTIONPOINT_API_KEY) {
-      console.error('Missing environment variables');
-      return res.status(500).json({
-        error: 'Server configuration error',
-        message: 'Missing required environment variables'
+      res.status(500).json({
+        error: 'Missing required environment variables',
+        details: 'FUNCTIONPOINT_BASE_URL and FUNCTIONPOINT_API_KEY must be set'
       });
+      return;
     }
-    
-    // Handle GET requests (health check)
+
+    // Create transport and connect server
+    const transport = new StreamableHTTPServerTransport({ req, res });
+    await server.connect(transport);
+    // Handle GET requests for testing/health check
     if (req.method === 'GET') {
-      if (req.url === '/test') {
-        try {
-          const testResult = await fetchAllEstimates({});
-          return res.status(200).json({
-            status: 'success',
-            message: 'API connection test successful',
-            hasData: testResult.success,
-            error: testResult.success ? null : testResult.error
-          });
-        } catch (error) {
-          return res.status(500).json({
-            status: 'error',
-            message: 'API connection test failed',
-            error: error.message
-          });
-        }
-      }
-      
-      // Default health check
-      return res.status(200).json({
+      const healthCheck = {
         status: 'healthy',
         server: 'FunctionPoint-Estimates-API-Server',
         version: '1.0.0',
         timestamp: new Date().toISOString(),
-        tools: ['GetAllEstimates']
-      });
+        endpoints: {
+          mcp: 'POST / (MCP protocol)',
+          health: 'GET / (this endpoint)',
+          test: 'GET /test (test API connection)'
+        }
+      };
+      
+      res.status(200).json(healthCheck);
+      return;
     }
     
-    // Handle POST requests (MCP protocol)
+    // Handle test endpoint
+    if (req.method === 'GET' && req.url === '/test') {
+      try {
+        const testResult = await fetchAllEstimates({});
+        res.status(200).json({
+          status: 'success',
+          message: 'API connection test successful',
+          data: testResult
+        });
+      } catch (error) {
+        res.status(500).json({
+          status: 'error',
+          message: 'API connection test failed',
+          error: error.message
+        });
+      }
+      return;
+    }
+    
+    // Handle MCP protocol requests (POST with JSON-RPC)
     if (req.method === 'POST') {
+      // Check if it's a proper MCP request
       const contentType = req.headers['content-type'];
       if (!contentType || !contentType.includes('application/json')) {
-        return res.status(400).json({
+        res.status(400).json({
           error: 'Invalid content type',
-          message: 'Must use application/json'
+          message: 'MCP requests must use application/json content type',
+          expected: 'application/json'
         });
+        return;
       }
       
-      // Validate request body
-      if (!req.body) {
-        return res.status(400).json({
-          error: 'Empty request body',
-          message: 'JSON-RPC request required'
-        });
-      }
-      
-      const result = await handleMCPRequest(req.body);
-      return res.status(200).json(result);
+      // For MCP protocol, use streaming transport
+      const transport = new StreamableHTTPServerTransport({ req, res });
+      await server.connect(transport);
+    } else {
+      res.status(405).json({
+        error: 'Method not allowed',
+        allowed: ['GET', 'POST', 'OPTIONS']
+      });
     }
-    
-    // Method not allowed
-    return res.status(405).json({
-      error: 'Method not allowed',
-      allowed: ['GET', 'POST', 'OPTIONS']
-    });
-    
+
   } catch (error) {
     console.error('Handler error:', error);
-    
-    // Make sure we don't send response twice
+
+    // Only send response if headers haven't been sent
     if (!res.headersSent) {
-      return res.status(500).json({
-        error: 'Internal server error',
-        message: error.message,
-        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      res.status(500).json({
+        error: 'Server initialization failed',
+        error: 'Server error',
+        message: error.message
       });
     }
   }
