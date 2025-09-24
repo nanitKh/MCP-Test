@@ -1,58 +1,3 @@
-/*import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-//import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import axios from "axios";
-import dotenv from "dotenv";
-dotenv.config();
-
-
-
-const server = new McpServer(
-    {
-  name: "estimate-api",
-  version: "1.0.0"
-},
-{
-    
-        capabilities: {
-          tools: {}, // must declare tools
-        },
-      
-}
-);
-
-async function getAllEst() {
-  const res = await axios.get(
-    `${process.env.FUNCTIONPOINT_BASE_URL}/estimates?page=1&itemsPerPage=20`,
-    {
-      headers: {
-        accept: "application/ld+json",
-        Authorization: `Bearer ${process.env.FUNCTIONPOINT_API_KEY}`
-      }
-    }
-  );
-  return res.data;
-}
-
-server.registerTool(
-  {
-    name: "getAllEstimates",
-    description: "Fetch estimates from FunctionPoint API",
-    input: { type: "object", properties: {} },
-    output: { type: "object" }
-  },
-  async () => {
-    const data = await getAllEst();
-    return { content: [{ type: "text", text: JSON.stringify(data) }] };
-  }
-);
-
-export default async function handler(req, res) {
-    const transport = new StreamableHTTPServerTransport({ req, res });
-    await server.connect(transport);
-  }
-*/
-
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import axios from "axios";
@@ -104,7 +49,7 @@ async function fetchAllEstimates(filters = {}) {
       headers: {
         'Accept': 'application/ld+json',
         'Authorization': `Bearer ${process.env.FUNCTIONPOINT_API_KEY}`,
-        'Content-Type': 'application/ld+json'
+        'Content-Type': 'application/json'
       },
       timeout: 10000 // 10 second timeout
     });
@@ -196,7 +141,7 @@ server.registerTool(
 // Vercel serverless function handler
 export default async function handler(req, res) {
   try {
-    // Set CORS headers for Copilot Studio
+    // Set CORS headers
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -216,9 +161,65 @@ export default async function handler(req, res) {
       return;
     }
     
-    // Create transport and connect server
-    const transport = new StreamableHTTPServerTransport({ req, res });
-    await server.connect(transport);
+    // Handle GET requests for testing/health check
+    if (req.method === 'GET') {
+      const healthCheck = {
+        status: 'healthy',
+        server: 'FunctionPoint-Estimates-API-Server',
+        version: '1.0.0',
+        timestamp: new Date().toISOString(),
+        endpoints: {
+          mcp: 'POST / (MCP protocol)',
+          health: 'GET / (this endpoint)',
+          test: 'GET /test (test API connection)'
+        }
+      };
+      
+      res.status(200).json(healthCheck);
+      return;
+    }
+    
+    // Handle test endpoint
+    if (req.method === 'GET' && req.url === '/test') {
+      try {
+        const testResult = await fetchAllEstimates({});
+        res.status(200).json({
+          status: 'success',
+          message: 'API connection test successful',
+          data: testResult
+        });
+      } catch (error) {
+        res.status(500).json({
+          status: 'error',
+          message: 'API connection test failed',
+          error: error.message
+        });
+      }
+      return;
+    }
+    
+    // Handle MCP protocol requests (POST with JSON-RPC)
+    if (req.method === 'POST') {
+      // Check if it's a proper MCP request
+      const contentType = req.headers['content-type'];
+      if (!contentType || !contentType.includes('application/json')) {
+        res.status(400).json({
+          error: 'Invalid content type',
+          message: 'MCP requests must use application/json content type',
+          expected: 'application/json'
+        });
+        return;
+      }
+      
+      // For MCP protocol, use streaming transport
+      const transport = new StreamableHTTPServerTransport({ req, res });
+      await server.connect(transport);
+    } else {
+      res.status(405).json({
+        error: 'Method not allowed',
+        allowed: ['GET', 'POST', 'OPTIONS']
+      });
+    }
     
   } catch (error) {
     console.error('Handler error:', error);
@@ -226,7 +227,7 @@ export default async function handler(req, res) {
     // Only send response if headers haven't been sent
     if (!res.headersSent) {
       res.status(500).json({
-        error: 'Server initialization failed',
+        error: 'Server error',
         message: error.message
       });
     }
